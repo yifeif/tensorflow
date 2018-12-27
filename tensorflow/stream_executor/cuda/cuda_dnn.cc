@@ -34,6 +34,11 @@ limitations under the License.
 #include "tensorflow/stream_executor/cuda/cuda_timer.h"
 #include "tensorflow/stream_executor/cuda/cudnn_version.h"
 #include "tensorflow/stream_executor/dnn.h"
+
+#ifndef PLATFORM_GOOGLE
+#include "tensorflow/stream_executor/dso_loader.h"
+#endif
+
 #include "tensorflow/stream_executor/lib/env.h"
 #include "tensorflow/stream_executor/lib/error.h"
 #include "tensorflow/stream_executor/lib/initialize.h"
@@ -156,6 +161,129 @@ class CudnnHandle {
 };
 
 }  // namespace
+
+#ifdef PLATFORM_GOOGLE
+// This macro wraps a global identifier, given by __name, in a callable
+// structure that loads the DLL symbol out of the DSO handle in a thread-safe
+// manner on first use. This dynamic loading technique is used to avoid DSO
+// dependencies on vendor libraries which may or may not be available in the
+// deployed binary environment.
+#define STREAM_EXECUTOR_CUDNN_WRAP(__name)   \
+  struct WrapperShim__##__name {             \
+    template <typename... Args>              \
+    cudnnStatus_t operator()(Args... args) { \
+      return ::__name(args...);              \
+    }                                        \
+  } __name;
+
+#else
+#define STREAM_EXECUTOR_CUDNN_WRAP(__name)                                \
+  struct DynLoadShim__##__name {                                          \
+    static const char* kName;                                             \
+    using FuncPtrT = std::add_pointer<decltype(::__name)>::type;          \
+    static void* GetDsoHandle() {                                         \
+      auto s = internal::CachedDsoLoader::GetCudnnDsoHandle();            \
+      return s.ValueOrDie();                                              \
+    }                                                                     \
+    static FuncPtrT LoadOrDie() {                                         \
+      void* f;                                                            \
+      auto s = port::Env::Default()->GetSymbolFromLibrary(GetDsoHandle(), \
+                                                          kName, &f);     \
+      CHECK(s.ok()) << "could not find " << kName                         \
+                    << " in cudnn DSO; dlerror: " << s.error_message();   \
+      return reinterpret_cast<FuncPtrT>(f);                               \
+    }                                                                     \
+    static FuncPtrT DynLoad() {                                           \
+      static FuncPtrT f = LoadOrDie();                                    \
+      return f;                                                           \
+    }                                                                     \
+    template <typename... Args>                                           \
+    cudnnStatus_t operator()(Args... args) {                              \
+      return DynLoad()(args...);                                          \
+    }                                                                     \
+  } __name;                                                               \
+  const char* DynLoadShim__##__name::kName = #__name;
+#endif
+
+// clang-format off
+
+#define CUDNN_ROUTINE_EACH(__macro)                           \
+  __macro(cudnnActivationForward)                             \
+  __macro(cudnnAddTensor)                                     \
+  __macro(cudnnBatchNormalizationBackward)                    \
+  __macro(cudnnBatchNormalizationForwardInference)            \
+  __macro(cudnnBatchNormalizationForwardTraining)             \
+  __macro(cudnnConvolutionBackwardBias)                       \
+  __macro(cudnnConvolutionBackwardData)                       \
+  __macro(cudnnConvolutionBackwardFilter)                     \
+  __macro(cudnnConvolutionBiasActivationForward)              \
+  __macro(cudnnConvolutionForward)                            \
+  __macro(cudnnCreate)                                        \
+  __macro(cudnnCreateActivationDescriptor)                    \
+  __macro(cudnnCreateConvolutionDescriptor)                   \
+  __macro(cudnnCreateDropoutDescriptor)                       \
+  __macro(cudnnCreateFilterDescriptor)                        \
+  __macro(cudnnCreateLRNDescriptor)                           \
+  __macro(cudnnCreatePersistentRNNPlan)                       \
+  __macro(cudnnCreatePoolingDescriptor)                       \
+  __macro(cudnnCreateRNNDescriptor)                           \
+  __macro(cudnnCreateTensorDescriptor)                        \
+  __macro(cudnnDestroy)                                       \
+  __macro(cudnnDestroyActivationDescriptor)                   \
+  __macro(cudnnDestroyConvolutionDescriptor)                  \
+  __macro(cudnnDestroyDropoutDescriptor)                      \
+  __macro(cudnnDestroyFilterDescriptor)                       \
+  __macro(cudnnDestroyLRNDescriptor)                          \
+  __macro(cudnnDestroyPersistentRNNPlan)                      \
+  __macro(cudnnDestroyPoolingDescriptor)                      \
+  __macro(cudnnDestroyRNNDescriptor)                          \
+  __macro(cudnnDestroyTensorDescriptor)                       \
+  __macro(cudnnDropoutGetStatesSize)                          \
+  __macro(cudnnGetActivationDescriptor)                       \
+  __macro(cudnnGetConvolutionBackwardDataAlgorithm)           \
+  __macro(cudnnGetConvolutionBackwardDataWorkspaceSize)       \
+  __macro(cudnnGetConvolutionBackwardFilterAlgorithm)         \
+  __macro(cudnnGetConvolutionBackwardFilterWorkspaceSize)     \
+  __macro(cudnnGetConvolutionForwardAlgorithm)                \
+  __macro(cudnnGetConvolutionForwardWorkspaceSize)            \
+  __macro(cudnnGetConvolutionNdDescriptor)                    \
+  __macro(cudnnGetConvolutionNdForwardOutputDim)              \
+  __macro(cudnnGetFilterNdDescriptor)                         \
+  __macro(cudnnGetProperty)                                   \
+  __macro(cudnnGetRNNLinLayerBiasParams)                      \
+  __macro(cudnnGetRNNLinLayerMatrixParams)                    \
+  __macro(cudnnGetRNNParamsSize)                              \
+  __macro(cudnnGetRNNTrainingReserveSize)                     \
+  __macro(cudnnGetRNNWorkspaceSize)                           \
+  __macro(cudnnLRNCrossChannelBackward)                       \
+  __macro(cudnnLRNCrossChannelForward)                        \
+  __macro(cudnnPoolingBackward)                               \
+  __macro(cudnnPoolingForward)                                \
+  __macro(cudnnRNNBackwardData)                               \
+  __macro(cudnnRNNBackwardWeights)                            \
+  __macro(cudnnRNNForwardInference)                           \
+  __macro(cudnnRNNForwardTraining)                            \
+  __macro(cudnnSetActivationDescriptor)                       \
+  __macro(cudnnSetConvolutionGroupCount)                      \
+  __macro(cudnnSetConvolutionMathType)                        \
+  __macro(cudnnSetConvolutionNdDescriptor)                    \
+  __macro(cudnnSetDropoutDescriptor)                          \
+  __macro(cudnnSetFilterNdDescriptor)                         \
+  __macro(cudnnSetLRNDescriptor)                              \
+  __macro(cudnnSetPersistentRNNPlan)                          \
+  __macro(cudnnSetPoolingNdDescriptor)                        \
+  __macro(cudnnSetRNNDescriptor)                              \
+  __macro(cudnnSetRNNDescriptor_v6)                           \
+  __macro(cudnnSetRNNMatrixMathType)                          \
+  __macro(cudnnSetStream)                                     \
+  __macro(cudnnSetTensor4dDescriptor)                         \
+  __macro(cudnnSetTensorNdDescriptor)                         \
+  __macro(cudnnTransformTensor)
+
+// clang-format on
+
+CUDNN_ROUTINE_EACH(STREAM_EXECUTOR_CUDNN_WRAP)
+#undef CUDNN_ROUTINE_EACH
 
 // Wraps a cuDNN handle and provides access to it through CudnnHandle
 // instances, which also locks a mutex, acquires the CUDA context, and sets
@@ -1190,14 +1318,21 @@ port::StatusOr<CudnnRnnParamsDescriptor> CudnnRnnParamsDescriptor::Create(
     for (int region = 0; region < region_count_per_layer; region++) {
       for (int type = 0; type < 2; type++) {
         void* offset = nullptr;
-        RETURN_IF_CUDNN_ERROR((type == 0 ? cudnnGetRNNLinLayerMatrixParams
-                                         : cudnnGetRNNLinLayerBiasParams)(
-            /*handle=*/cudnn.handle(), /*rnnDesc=*/rnn_desc,
-            /*layer=*/layer, /*xDesc=*/input_desc.get(),
-            /*wDesc=*/filter_desc.get(),
-            /*w=*/nullptr, /*linLayerID=*/region,
-            /*linLayerMatDesc=*/region_desc_handle.get(),
-            /*linLayerMat or linLayerBias=*/&offset));
+        RETURN_IF_CUDNN_ERROR(
+            type == 0 ? cudnnGetRNNLinLayerMatrixParams(
+                            /*handle=*/cudnn.handle(), /*rnnDesc=*/rnn_desc,
+                            /*layer=*/layer, /*xDesc=*/input_desc.get(),
+                            /*wDesc=*/filter_desc.get(),
+                            /*w=*/nullptr, /*linLayerID=*/region,
+                            /*linLayerMatDesc=*/region_desc_handle.get(),
+                            /*linLayerMat or linLayerBias=*/&offset)
+                      : cudnnGetRNNLinLayerBiasParams(
+                            /*handle=*/cudnn.handle(), /*rnnDesc=*/rnn_desc,
+                            /*layer=*/layer, /*xDesc=*/input_desc.get(),
+                            /*wDesc=*/filter_desc.get(),
+                            /*w=*/nullptr, /*linLayerID=*/region,
+                            /*linLayerMatDesc=*/region_desc_handle.get(),
+                            /*linLayerMat or linLayerBias=*/&offset));
         int dims[] = {1, 1, 1};
         cudnnDataType_t data_type;
         cudnnTensorFormat_t tensor_format;
