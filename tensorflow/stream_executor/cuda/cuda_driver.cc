@@ -34,6 +34,7 @@ limitations under the License.
 #include "tensorflow/stream_executor/lib/static_threadlocal.h"
 #include "tensorflow/stream_executor/lib/stringprintf.h"
 #include "tensorflow/stream_executor/lib/threadpool.h"
+#include "tensorflow/stream_executor/platform/dso_loader.h"
 #include "tensorflow/stream_executor/platform/logging.h"
 #include "tensorflow/stream_executor/platform/mutex.h"
 #include "tensorflow/stream_executor/platform/port.h"
@@ -48,6 +49,122 @@ constexpr bool kVerifyCudaContext = false;
 
 namespace stream_executor {
 namespace cuda {
+
+namespace wrap {
+
+#ifdef PLATFORM_GOOGLE
+#define STREAM_EXECUTOR_LIBCUDA_WRAP(__name) \
+  struct WrapperShim__##__name {             \
+    template <typename... Args>              \
+    CUresult operator()(Args... args) {      \
+      return ::__name(args...);              \
+    }                                        \
+  } __name;
+
+#else
+#define STREAM_EXECUTOR_LIBCUDA_WRAP(__name)                              \
+  struct DynLoadShim__##__name {                                          \
+    static const char *kName;                                             \
+    using FuncPtrT = std::add_pointer<decltype(::__name)>::type;          \
+    static void *GetDsoHandle() {                                         \
+      auto s = internal::CachedDsoLoader::GetLibcudaDsoHandle();          \
+      return s.ValueOrDie();                                              \
+    }                                                                     \
+    static FuncPtrT LoadOrDie() {                                         \
+      void *f;                                                            \
+      auto s = port::Env::Default()->GetSymbolFromLibrary(GetDsoHandle(), \
+                                                          kName, &f);     \
+      CHECK(s.ok()) << "could not find " << kName                         \
+                    << " in libcuda DSO; dlerror: " << s.error_message(); \
+      return reinterpret_cast<FuncPtrT>(f);                               \
+    }                                                                     \
+    static FuncPtrT DynLoad() {                                           \
+      static FuncPtrT f = LoadOrDie();                                    \
+      return f;                                                           \
+    }                                                                     \
+    template <typename... Args>                                           \
+    CUresult operator()(Args... args) {                                   \
+      return DynLoad()(args...);                                          \
+    }                                                                     \
+  } __name;                                                               \
+  const char *DynLoadShim__##__name::kName = #__name;
+
+#endif
+
+// clang-format off
+
+#define LIBCUDA_ROUTINE_EACH(__macro)                   \
+  __macro(cuCtxEnablePeerAccess)                        \
+  __macro(cuCtxGetCurrent)                              \
+  __macro(cuCtxGetDevice)                               \
+  __macro(cuCtxGetSharedMemConfig)                      \
+  __macro(cuCtxSetCurrent)                              \
+  __macro(cuCtxSetSharedMemConfig)                      \
+  __macro(cuCtxSynchronize)                             \
+  __macro(cuDeviceCanAccessPeer)                        \
+  __macro(cuDeviceComputeCapability)                    \
+  __macro(cuDeviceGet)                                  \
+  __macro(cuDeviceGetAttribute)                         \
+  __macro(cuDeviceGetCount)                             \
+  __macro(cuDeviceGetName)                              \
+  __macro(cuDeviceGetPCIBusId)                          \
+  __macro(cuDeviceGetProperties)                        \
+  __macro(cuDevicePrimaryCtxGetState)                   \
+  __macro(cuDevicePrimaryCtxRelease)                    \
+  __macro(cuDevicePrimaryCtxRetain)                     \
+  __macro(cuDevicePrimaryCtxSetFlags)                   \
+  __macro(cuDeviceTotalMem)                             \
+  __macro(cuDriverGetVersion)                           \
+  __macro(cuEventCreate)                                \
+  __macro(cuEventDestroy)                               \
+  __macro(cuEventElapsedTime)                           \
+  __macro(cuEventQuery)                                 \
+  __macro(cuEventRecord)                                \
+  __macro(cuEventSynchronize)                           \
+  __macro(cuFuncGetAttribute)                           \
+  __macro(cuFuncSetCacheConfig)                         \
+  __macro(cuGetErrorName)                               \
+  __macro(cuGetErrorString)                             \
+  __macro(cuInit)                                       \
+  __macro(cuLaunchKernel)                               \
+  __macro(cuMemAlloc)                                   \
+  __macro(cuMemAllocManaged)                            \
+  __macro(cuMemFree)                                    \
+  __macro(cuMemFreeHost)                                \
+  __macro(cuMemGetAddressRange)                         \
+  __macro(cuMemGetInfo)                                 \
+  __macro(cuMemHostAlloc)                               \
+  __macro(cuMemHostRegister)                            \
+  __macro(cuMemHostUnregister)                          \
+  __macro(cuMemcpyDtoD)                                 \
+  __macro(cuMemcpyDtoDAsync)                            \
+  __macro(cuMemcpyDtoH)                                 \
+  __macro(cuMemcpyDtoHAsync)                            \
+  __macro(cuMemcpyHtoD)                                 \
+  __macro(cuMemcpyHtoDAsync)                            \
+  __macro(cuMemsetD32)                                  \
+  __macro(cuMemsetD32Async)                             \
+  __macro(cuMemsetD8)                                   \
+  __macro(cuMemsetD8Async)                              \
+  __macro(cuModuleGetFunction)                          \
+  __macro(cuModuleGetGlobal)                            \
+  __macro(cuModuleLoadDataEx)                           \
+  __macro(cuModuleLoadFatBinary)                        \
+  __macro(cuModuleUnload)                               \
+  __macro(cuOccupancyMaxActiveBlocksPerMultiprocessor)  \
+  __macro(cuPointerGetAttribute)                        \
+  __macro(cuStreamAddCallback)                          \
+  __macro(cuStreamCreate)                               \
+  __macro(cuStreamDestroy)                              \
+  __macro(cuStreamQuery)                                \
+  __macro(cuStreamSynchronize)                          \
+  __macro(cuStreamWaitEvent)
+
+// clang-format on
+
+LIBCUDA_ROUTINE_EACH(STREAM_EXECUTOR_LIBCUDA_WRAP)
+#undef LIBCUDA_ROUTINE_EACH
+}  // namespace wrap
 
 namespace {
 
@@ -108,11 +225,11 @@ class CreatedContexts {
 // Formats CUresult to output prettified values into a log stream.
 string ToString(CUresult result) {
   const char *error_name;
-  if (cuGetErrorName(result, &error_name)) {
+  if (wrap::cuGetErrorName(result, &error_name)) {
     return absl::StrCat("UNKNOWN ERROR (", static_cast<int>(result), ")");
   }
   const char *error_string;
-  if (cuGetErrorString(result, &error_string)) {
+  if (wrap::cuGetErrorString(result, &error_string)) {
     return error_name;
   }
   return absl::StrCat(error_name, ": ", error_string);
@@ -167,7 +284,7 @@ namespace {
 
 // Call cuCtxtSynchronize and crash if it doesn't succeed.
 void SynchronizeOrDie() {
-  auto res = cuCtxSynchronize();
+  auto res = wrap::cuCtxSynchronize();
   if (res != CUDA_SUCCESS) {
     LOG(FATAL) << "Synchronize found "
                << ToString(res) << " :: " << port::CurrentStackTrace();
@@ -203,7 +320,7 @@ ScopedActivateContext::ScopedActivateContext(CudaContext* cuda_context) {
   to_restore_ = (tls->depth == 1 ? nullptr : tls->context);
 
   // Set the context and update thread local.
-  CHECK_EQ(CUDA_SUCCESS, cuCtxSetCurrent(cuda_context->context()));
+  CHECK_EQ(CUDA_SUCCESS, wrap::cuCtxSetCurrent(cuda_context->context()));
   tls->id = cuda_context->id();
   tls->context = cuda_context;
 }
@@ -228,7 +345,7 @@ ScopedActivateContext::~ScopedActivateContext() {
   }
 
   // Set context and update thread local.
-  CHECK_EQ(CUDA_SUCCESS, cuCtxSetCurrent(to_restore_->context()));
+  CHECK_EQ(CUDA_SUCCESS, wrap::cuCtxSetCurrent(to_restore_->context()));
   tls->id = to_restore_->id();
   tls->context = to_restore_;
 }
@@ -290,7 +407,7 @@ static port::Status InternalInit() {
   if (FLAGS_gpuexec_cuda_driver_inject_init_error) {
     LOG(ERROR) << "injecting CUDA init error; initialization will fail";
   } else {
-    res = cuInit(0 /* = flags */);
+    res = wrap::cuInit(0 /* = flags */);
   }
 
   if (res == CUDA_SUCCESS) {
@@ -323,7 +440,7 @@ static port::Status InternalInit() {
 
 /* static */ port::Status CUDADriver::GetDevice(int device_ordinal,
                                                 CUdevice *device) {
-  CUresult res = cuDeviceGet(device, device_ordinal);
+  CUresult res = wrap::cuDeviceGet(device, device_ordinal);
   if (res == CUDA_SUCCESS) {
     return port::Status::OK();
   }
@@ -337,7 +454,7 @@ static port::Status InternalInit() {
                                             string *device_name) {
   static const size_t kCharLimit = 64;
   absl::InlinedVector<char, 4> chars(kCharLimit);
-  CUresult res = cuDeviceGetName(chars.begin(), kCharLimit - 1, device);
+  CUresult res = wrap::cuDeviceGetName(chars.begin(), kCharLimit - 1, device);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to get device name for " << device << ": "
                << ToString(res);
@@ -388,9 +505,9 @@ bool DeviceOptionsToContextFlags(const DeviceOptions &device_options,
 
   unsigned int former_primary_context_flags;
   int former_primary_context_is_active;
-  CHECK_EQ(CUDA_SUCCESS,
-           cuDevicePrimaryCtxGetState(device, &former_primary_context_flags,
-                                      &former_primary_context_is_active));
+  CHECK_EQ(CUDA_SUCCESS, wrap::cuDevicePrimaryCtxGetState(
+                             device, &former_primary_context_flags,
+                             &former_primary_context_is_active));
   if (former_primary_context_flags != flags) {
     if (former_primary_context_is_active) {
       LOG(ERROR)
@@ -398,15 +515,15 @@ bool DeviceOptionsToContextFlags(const DeviceOptions &device_options,
           << former_primary_context_flags << ") than the desired flag set ("
           << flags << ").";
     } else {
-      CHECK_EQ(CUDA_SUCCESS, cuDevicePrimaryCtxSetFlags(device, flags));
+      CHECK_EQ(CUDA_SUCCESS, wrap::cuDevicePrimaryCtxSetFlags(device, flags));
     }
   }
 
   former_context = CUDADriver::CurrentContextOrDie();
-  res = cuDevicePrimaryCtxRetain(&new_context, device);
+  res = wrap::cuDevicePrimaryCtxRetain(&new_context, device);
   if (former_context != nullptr) {
     CUdevice former_device;
-    if (cuCtxGetDevice(&former_device) == CUDA_SUCCESS) {
+    if (wrap::cuCtxGetDevice(&former_device) == CUDA_SUCCESS) {
       if (former_device == device) {
         if (former_context == new_context) {
           VLOG(2) << "The primary context " << former_context << " for device "
@@ -425,7 +542,7 @@ bool DeviceOptionsToContextFlags(const DeviceOptions &device_options,
                  << former_context;
     }
   }
-  CHECK_EQ(CUDA_SUCCESS, cuCtxSetCurrent(former_context));
+  CHECK_EQ(CUDA_SUCCESS, wrap::cuCtxSetCurrent(former_context));
 
   if (res == CUDA_SUCCESS) {
     *context = CreatedContexts::Add(new_context);
@@ -454,12 +571,12 @@ bool DeviceOptionsToContextFlags(const DeviceOptions &device_options,
     return;
   }
   CUcontext former_context = CurrentContext();
-  CUresult res = cuCtxSetCurrent(context->context());
+  CUresult res = wrap::cuCtxSetCurrent(context->context());
   CUdevice device;
-  cuCtxGetDevice(&device);
-  cuCtxSetCurrent(former_context);
+  wrap::cuCtxGetDevice(&device);
+  wrap::cuCtxSetCurrent(former_context);
 
-  res = cuDevicePrimaryCtxRelease(device);
+  res = wrap::cuDevicePrimaryCtxRelease(device);
 
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to release CUDA context; leaking: " << ToString(res);
@@ -471,7 +588,7 @@ bool DeviceOptionsToContextFlags(const DeviceOptions &device_options,
 /* static */ bool CUDADriver::FuncGetAttribute(CUfunction_attribute attribute,
                                                CUfunction func,
                                                int *attribute_value) {
-  CUresult res = cuFuncGetAttribute(attribute_value, attribute, func);
+  CUresult res = wrap::cuFuncGetAttribute(attribute_value, attribute, func);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query kernel attribute. kernel: " << func
                << ", attribute: " << attribute;
@@ -482,7 +599,7 @@ bool DeviceOptionsToContextFlags(const DeviceOptions &device_options,
 
 /* static */ bool CUDADriver::FuncSetCacheConfig(CUfunction function,
                                                  CUfunc_cache cache_config) {
-  CUresult res = cuFuncSetCacheConfig(function, cache_config);
+  CUresult res = wrap::cuFuncSetCacheConfig(function, cache_config);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to set CUDA kernel cache config. kernel: " << function
                << ", config: " << cache_config << ", result: " << ToString(res);
@@ -496,10 +613,10 @@ bool DeviceOptionsToContextFlags(const DeviceOptions &device_options,
 CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   CUsharedconfig shared_mem_config;
   ScopedActivateContext activation(context);
-  CUresult result = cuCtxGetSharedMemConfig(&shared_mem_config);
+  CUresult result = wrap::cuCtxGetSharedMemConfig(&shared_mem_config);
   if (result != CUDA_SUCCESS) {
     CUdevice device;
-    cuCtxGetDevice(&device);
+    wrap::cuCtxGetDevice(&device);
     LOG(ERROR) << "failed to get CUDA device shared memory config. "
                << "Context device ID: " << device
                << ", result: " << ToString(result);
@@ -513,10 +630,10 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 /* static */ port::Status CUDADriver::ContextSetSharedMemConfig(
     CudaContext* context, CUsharedconfig shared_mem_config) {
   ScopedActivateContext activation(context);
-  CUresult result = cuCtxSetSharedMemConfig(shared_mem_config);
+  CUresult result = wrap::cuCtxSetSharedMemConfig(shared_mem_config);
   if (result != CUDA_SUCCESS) {
     CUdevice device;
-    cuCtxGetDevice(&device);
+    wrap::cuCtxGetDevice(&device);
     LOG(ERROR) << "failed to set CUDA device shared memory config. "
                << "Context device ID: " << device
                << ", config: " << shared_mem_config
@@ -539,9 +656,9 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
           << " gdy: " << grid_dim_y << " gdz: " << grid_dim_z
           << " bdx: " << block_dim_x << " bdy: " << block_dim_y
           << " bdz: " << block_dim_z;
-  CUresult res = cuLaunchKernel(function, grid_dim_x, grid_dim_y, grid_dim_z,
-                                block_dim_x, block_dim_y, block_dim_z,
-                                shared_mem_bytes, stream, kernel_params, extra);
+  CUresult res = wrap::cuLaunchKernel(
+      function, grid_dim_x, grid_dim_y, grid_dim_z, block_dim_x, block_dim_y,
+      block_dim_z, shared_mem_bytes, stream, kernel_params, extra);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to launch CUDA kernel: " << function
                << "; result: " << ToString(res);
@@ -555,7 +672,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                 const char *cubin_bytes,
                                                 CUmodule *module) {
   ScopedActivateContext activation(context);
-  CUresult result = cuModuleLoadFatBinary(module, cubin_bytes);
+  CUresult result = wrap::cuModuleLoadFatBinary(module, cubin_bytes);
   if (result != CUDA_SUCCESS) {
     return port::Status(port::error::INTERNAL,
                         "failed to load in-memory CUBIN: " + ToString(result));
@@ -598,8 +715,8 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
       // TODO(leary) Need to see if NVIDIA can expunge the leakiness in their
       // module loading: see http://b/13248943
 
-      res = cuModuleLoadDataEx(module, ptx_data, TF_ARRAYSIZE(options),
-                               options, option_values);
+      res = wrap::cuModuleLoadDataEx(module, ptx_data, TF_ARRAYSIZE(options),
+                                     options, option_values);
     }
 
     // The PTX JIT mutates the values in the option values array to reflect the
@@ -638,7 +755,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                      CUdeviceptr location,
                                                      uint8 value, size_t size) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemsetD8(location, value, size);
+  CUresult res = wrap::cuMemsetD8(location, value, size);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to memset memory: " << ToString(res);
     return false;
@@ -651,7 +768,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                       uint32 value,
                                                       size_t uint32_count) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemsetD32(location, value, uint32_count);
+  CUresult res = wrap::cuMemsetD32(location, value, uint32_count);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to memset memory: " << ToString(res);
     return false;
@@ -665,7 +782,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                       size_t uint32_count,
                                                       CUstream stream) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemsetD8Async(location, value, uint32_count, stream);
+  CUresult res = wrap::cuMemsetD8Async(location, value, uint32_count, stream);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to enqueue async memset operation: " << ToString(res);
     return false;
@@ -680,7 +797,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                        size_t uint32_count,
                                                        CUstream stream) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemsetD32Async(location, value, uint32_count, stream);
+  CUresult res = wrap::cuMemsetD32Async(location, value, uint32_count, stream);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to enqueue async memset operation: " << ToString(res);
     return false;
@@ -694,7 +811,8 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                 StreamCallback callback,
                                                 void *data) {
   // Note: flags param is required to be zero according to CUDA 6.0.
-  CUresult res = cuStreamAddCallback(stream, callback, data, 0 /* = flags */);
+  CUresult res =
+      wrap::cuStreamAddCallback(stream, callback, data, 0 /* = flags */);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "unable to add host callback: " << ToString(res);
     return false;
@@ -708,7 +826,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                 CUfunction *function) {
   ScopedActivateContext activated{context};
   CHECK(module != nullptr && kernel_name != nullptr);
-  CUresult res = cuModuleGetFunction(function, module, kernel_name);
+  CUresult res = wrap::cuModuleGetFunction(function, module, kernel_name);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to get PTX kernel \"" << kernel_name
                << "\" from module: " << ToString(res);
@@ -726,7 +844,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   ScopedActivateContext activated{context};
   CHECK(module != nullptr && symbol_name != nullptr &&
         (dptr != nullptr || bytes != nullptr));
-  CUresult res = cuModuleGetGlobal(dptr, bytes, module, symbol_name);
+  CUresult res = wrap::cuModuleGetGlobal(dptr, bytes, module, symbol_name);
   if (res != CUDA_SUCCESS) {
     // symbol may not be found in the current module, but it may reside in
     // another module.
@@ -741,7 +859,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 /* static */ void CUDADriver::UnloadModule(CudaContext *context,
                                            CUmodule module) {
   ScopedActivateContext activated{context};
-  CUresult res = cuModuleUnload(module);
+  CUresult res = wrap::cuModuleUnload(module);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to unload module " << module
                << "; leaking: " << ToString(res);
@@ -752,7 +870,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
     CudaContext* context) {
   ScopedActivateContext activated{context};
   CUdevice device = -1;
-  CUresult result = cuCtxGetDevice(&device);
+  CUresult result = wrap::cuCtxGetDevice(&device);
   if (result == CUDA_SUCCESS) {
     return device;
   }
@@ -768,7 +886,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   // up synchronization with respect to memsets and any other things that have
   // to occur on the default stream?
   ScopedActivateContext activated{context};
-  CUresult res = cuStreamCreate(out, 0);
+  CUresult res = wrap::cuStreamCreate(out, 0);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "could not allocate CUDA stream for context "
                << context->context() << ": " << ToString(res);
@@ -787,7 +905,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   }
 
   ScopedActivateContext activated{context};
-  CUresult res = cuStreamDestroy(*stream);
+  CUresult res = wrap::cuStreamDestroy(*stream);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to destroy CUDA stream for context "
                << context->context() << ": " << ToString(res);
@@ -802,7 +920,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                               uint64 bytes) {
   ScopedActivateContext activated{context};
   CUdeviceptr result = 0;
-  CUresult res = cuMemAlloc(&result, bytes);
+  CUresult res = wrap::cuMemAlloc(&result, bytes);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to allocate "
                << port::HumanReadableNumBytes::ToString(bytes) << " (" << bytes
@@ -819,7 +937,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                void *location) {
   ScopedActivateContext activation(context);
   CUdeviceptr pointer = absl::bit_cast<CUdeviceptr>(location);
-  CUresult res = cuMemFree(pointer);
+  CUresult res = wrap::cuMemFree(pointer);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to free device memory at " << location
                << "; result: " << ToString(res);
@@ -834,7 +952,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   ScopedActivateContext activation(context);
   CUdeviceptr result = 0;
   // "Portable" memory is visible to all CUDA contexts. Safe for our use model.
-  CUresult res = cuMemAllocManaged(&result, bytes, CU_MEM_ATTACH_GLOBAL);
+  CUresult res = wrap::cuMemAllocManaged(&result, bytes, CU_MEM_ATTACH_GLOBAL);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to alloc " << bytes
                << " bytes unified memory; result: " << ToString(res);
@@ -850,7 +968,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                       void *location) {
   ScopedActivateContext activation(context);
   CUdeviceptr pointer = absl::bit_cast<CUdeviceptr>(location);
-  CUresult res = cuMemFree(pointer);
+  CUresult res = wrap::cuMemFree(pointer);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to free unified memory at " << location
                << "; result: " << ToString(res);
@@ -865,7 +983,8 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   ScopedActivateContext activation(context);
   void *host_mem = nullptr;
   // "Portable" memory is visible to all CUDA contexts. Safe for our use model.
-  CUresult res = cuMemHostAlloc(&host_mem, bytes, CU_MEMHOSTALLOC_PORTABLE);
+  CUresult res =
+      wrap::cuMemHostAlloc(&host_mem, bytes, CU_MEMHOSTALLOC_PORTABLE);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to alloc " << bytes
                << " bytes on host: " << ToString(res);
@@ -876,7 +995,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 /* static */ void CUDADriver::HostDeallocate(CudaContext* context,
                                              void *location) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemFreeHost(location);
+  CUresult res = wrap::cuMemFreeHost(location);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "error deallocating host memory at " << location << ": "
                << ToString(res);
@@ -888,7 +1007,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   ScopedActivateContext activation(context);
   // "Portable" memory is visible to all CUDA contexts. Safe for our use model.
   CUresult res =
-      cuMemHostRegister(location, bytes, CU_MEMHOSTREGISTER_PORTABLE);
+      wrap::cuMemHostRegister(location, bytes, CU_MEMHOSTREGISTER_PORTABLE);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "error registering host memory at " << location << ": "
                << ToString(res);
@@ -900,7 +1019,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 /* static */ bool CUDADriver::HostUnregister(CudaContext* context,
                                              void *location) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemHostUnregister(location);
+  CUresult res = wrap::cuMemHostUnregister(location);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "error unregistering host memory at " << location << ": "
                << ToString(res);
@@ -917,7 +1036,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   }
 
   ScopedActivateContext activated{context};
-  CUresult res = cuEventDestroy(*event);
+  CUresult res = wrap::cuEventDestroy(*event);
   *event = nullptr;
 
   switch (res) {
@@ -941,7 +1060,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                   CUevent event,
                                                   CUstream stream) {
   ScopedActivateContext activated{context};
-  CUresult res = cuEventRecord(event, stream);
+  CUresult res = wrap::cuEventRecord(event, stream);
   switch (res) {
     case CUDA_SUCCESS:
       return port::Status::OK();
@@ -962,7 +1081,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 /* static */ port::StatusOr<CUresult> CUDADriver::QueryEvent(
     CudaContext *context, CUevent event) {
   ScopedActivateContext activated{context};
-  CUresult res = cuEventQuery(event);
+  CUresult res = wrap::cuEventQuery(event);
   if (res != CUDA_SUCCESS && res != CUDA_ERROR_NOT_READY) {
     return port::Status(
         port::error::INTERNAL,
@@ -978,12 +1097,12 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   ScopedActivateContext activated{context};
   // The stop event must have completed in order for cuEventElapsedTime to
   // work.
-  CUresult res = cuEventSynchronize(stop);
+  CUresult res = wrap::cuEventSynchronize(stop);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to synchronize the stop event: " << ToString(res);
     return false;
   }
-  res = cuEventElapsedTime(elapsed_milliseconds, start, stop);
+  res = wrap::cuEventElapsedTime(elapsed_milliseconds, start, stop);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to get elapsed time between events: "
                << ToString(res);
@@ -997,7 +1116,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                 CUstream stream,
                                                 CUevent event) {
   ScopedActivateContext activation(context);
-  CUresult res = cuStreamWaitEvent(stream, event, 0 /* = flags */);
+  CUresult res = wrap::cuStreamWaitEvent(stream, event, 0 /* = flags */);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "could not wait stream on event: " << ToString(res);
     return false;
@@ -1008,7 +1127,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 
 /* static */ bool CUDADriver::SynchronizeContext(CudaContext* context) {
   ScopedActivateContext activation(context);
-  CUresult res = cuCtxSynchronize();
+  CUresult res = wrap::cuCtxSynchronize();
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "could not synchronize on CUDA context: " << ToString(res)
                << " :: " << port::CurrentStackTrace();
@@ -1022,7 +1141,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                         CUstream stream) {
   ScopedActivateContext activated{context};
   CHECK(stream != nullptr);
-  CUresult res = cuStreamSynchronize(stream);
+  CUresult res = wrap::cuStreamSynchronize(stream);
   if (res != CUDA_SUCCESS) {
     port::Status status = port::InternalError(
         absl::StrCat("could not synchronize on CUDA stream: ", ToString(res)));
@@ -1038,7 +1157,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                            CUstream stream) {
   ScopedActivateContext activated{context};
   CHECK(stream != nullptr);
-  CUresult res = cuStreamQuery(stream);
+  CUresult res = wrap::cuStreamQuery(stream);
   if (res == CUDA_SUCCESS) {
     return true;
   }
@@ -1054,7 +1173,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                            CUdeviceptr gpu_src,
                                                            uint64 size) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemcpyDtoH(host_dst, gpu_src, size);
+  CUresult res = wrap::cuMemcpyDtoH(host_dst, gpu_src, size);
   if (res != CUDA_SUCCESS) {
     return port::InternalError(
         port::Printf("failed to synchronous memcpy from device to host: %s; "
@@ -1072,7 +1191,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                            const void *host_src,
                                                            uint64 size) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemcpyHtoD(gpu_dst, host_src, size);
+  CUresult res = wrap::cuMemcpyHtoD(gpu_dst, host_src, size);
   if (res != CUDA_SUCCESS) {
     return port::InternalError(port::Printf(
         "failed to synchronous memcpy from host to device: %s; GPU dst: %p;"
@@ -1089,7 +1208,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                            CUdeviceptr gpu_src,
                                                            uint64 size) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemcpyDtoD(gpu_dst, gpu_src, size);
+  CUresult res = wrap::cuMemcpyDtoD(gpu_dst, gpu_src, size);
   if (res != CUDA_SUCCESS) {
     return port::InternalError(port::Printf(
         "failed to synchronous memcpy from host to device: %s; GPU dst: %p; "
@@ -1107,7 +1226,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                     uint64 size,
                                                     CUstream stream) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemcpyDtoHAsync(host_dst, gpu_src, size, stream);
+  CUresult res = wrap::cuMemcpyDtoHAsync(host_dst, gpu_src, size, stream);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << port::Printf(
         "failed to enqueue async memcpy from device to host: %s; host dst: %p; "
@@ -1128,7 +1247,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                     uint64 size,
                                                     CUstream stream) {
   ScopedActivateContext activation(context);
-  CUresult res = cuMemcpyHtoDAsync(gpu_dst, host_src, size, stream);
+  CUresult res = wrap::cuMemcpyHtoDAsync(gpu_dst, host_src, size, stream);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << port::Printf(
         "failed to enqueue async memcpy from host to device: %s; GPU dst: %p; "
@@ -1148,7 +1267,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                     uint64 size,
                                                     CUstream stream) {
   ScopedActivateContext activation(context);
-  CUresult result = cuMemcpyDtoDAsync(gpu_dst, gpu_src, size, stream);
+  CUresult result = wrap::cuMemcpyDtoDAsync(gpu_dst, gpu_src, size, stream);
   if (result != CUDA_SUCCESS) {
     LOG(ERROR) << port::Printf(
         "failed to enqueue async memcpy from device to device: %s"
@@ -1185,7 +1304,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
   }
 
   ScopedActivateContext activated{context};
-  CUresult res = cuEventCreate(result, cuflags);
+  CUresult res = wrap::cuEventCreate(result, cuflags);
 
   if (res == CUDA_SUCCESS) {
     return port::Status::OK();
@@ -1201,7 +1320,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 
 /* static */ int CUDADriver::GetDeviceCount() {
   int device_count = 0;
-  CUresult res = cuDeviceGetCount(&device_count);
+  CUresult res = wrap::cuDeviceGetCount(&device_count);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "could not retrieve CUDA device count: " << ToString(res);
     return 0;
@@ -1216,8 +1335,8 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 /* static */ port::StatusOr<CudaContext*> CUDADriver::GetPointerContext(
     CUdeviceptr pointer) {
   CudaContext* context = nullptr;
-  CUresult result =
-      cuPointerGetAttribute(&context, CU_POINTER_ATTRIBUTE_CONTEXT, pointer);
+  CUresult result = wrap::cuPointerGetAttribute(
+      &context, CU_POINTER_ATTRIBUTE_CONTEXT, pointer);
   if (result == CUDA_SUCCESS) {
     CHECK(context != nullptr) << "success should entail non-null context";
     return context;
@@ -1232,8 +1351,8 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 /* static */ port::StatusOr<MemorySpace> CUDADriver::GetPointerMemorySpace(
     CUdeviceptr pointer) {
   unsigned int value;
-  CUresult result =
-      cuPointerGetAttribute(&value, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, pointer);
+  CUresult result = wrap::cuPointerGetAttribute(
+      &value, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, pointer);
   if (result == CUDA_SUCCESS) {
     switch (value) {
       case CU_MEMORYTYPE_DEVICE:
@@ -1256,7 +1375,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
 /* static */ port::Status CUDADriver::GetPointerAddressRange(CUdeviceptr dptr,
                                                              CUdeviceptr *base,
                                                              size_t *size) {
-  CUresult result = cuMemGetAddressRange(base, size, dptr);
+  CUresult result = wrap::cuMemGetAddressRange(base, size, dptr);
   if (result == CUDA_SUCCESS) {
     return port::Status::OK();
   } else if (result == CUDA_ERROR_NOT_FOUND) {
@@ -1290,7 +1409,7 @@ CUDADriver::ContextGetSharedMemConfig(CudaContext* context) {
                                                            CUdevice device) {
   *cc_major = 0;
   *cc_minor = 0;
-  CUresult result = cuDeviceComputeCapability(cc_major, cc_minor, device);
+  CUresult result = wrap::cuDeviceComputeCapability(cc_major, cc_minor, device);
   if (result == CUDA_SUCCESS) {
     return port::Status::OK();
   }
@@ -1307,7 +1426,7 @@ template <typename T>
 static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
                                             CUdevice_attribute attribute) {
   int value = -1;
-  CUresult result = cuDeviceGetAttribute(&value, attribute, device);
+  CUresult result = wrap::cuDeviceGetAttribute(&value, attribute, device);
   if (result != CUDA_SUCCESS) {
     return port::Status(
         port::error::NOT_FOUND,
@@ -1362,24 +1481,24 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
 /* static */ bool CUDADriver::GetGridLimits(int *x, int *y, int *z,
                                             CUdevice device) {
   int value;
-  CUresult res =
-      cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X, device);
+  CUresult res = wrap::cuDeviceGetAttribute(
+      &value, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X, device);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query max grid dim x: " << ToString(res);
     return false;
   }
   *x = value;
 
-  res =
-      cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y, device);
+  res = wrap::cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y,
+                                   device);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query max grid dim y: " << ToString(res);
     return false;
   }
   *y = value;
 
-  res =
-      cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z, device);
+  res = wrap::cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z,
+                                   device);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query max grid dim z: " << ToString(res);
     return false;
@@ -1389,7 +1508,7 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
 }
 
 /* static */ bool CUDADriver::GetDriverVersion(int *driver_version) {
-  CUresult res = cuDriverGetVersion(driver_version);
+  CUresult res = wrap::cuDriverGetVersion(driver_version);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query driver version: " << ToString(res);
     return false;
@@ -1400,7 +1519,7 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
 
 /* static */ bool CUDADriver::GetDeviceProperties(CUdevprop *device_properties,
                                                   int device_ordinal) {
-  CUresult res = cuDeviceGetProperties(device_properties, device_ordinal);
+  CUresult res = wrap::cuDeviceGetProperties(device_properties, device_ordinal);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query device properties: " << ToString(res);
     return false;
@@ -1412,7 +1531,7 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
 /* static */ port::StatusOr<int> CUDADriver::GetDeviceAttribute(
     CUdevice_attribute attribute, CUdevice device) {
   int val;
-  CUresult res = cuDeviceGetAttribute(&val, attribute, device);
+  CUresult res = wrap::cuDeviceGetAttribute(&val, attribute, device);
   if (res != CUDA_SUCCESS) {
     return port::Status(
         port::error::INTERNAL,
@@ -1424,8 +1543,8 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
 
 /* static */ bool CUDADriver::IsEccEnabled(CUdevice device, bool *result) {
   int value = -1;
-  CUresult res =
-      cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_ECC_ENABLED, device);
+  CUresult res = wrap::cuDeviceGetAttribute(
+      &value, CU_DEVICE_ATTRIBUTE_ECC_ENABLED, device);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query ECC status: " << ToString(res);
     return false;
@@ -1441,7 +1560,7 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
   ScopedActivateContext activation(context);
   size_t free = 0;
   size_t total = 0;
-  CUresult res = cuMemGetInfo(&free, &total);
+  CUresult res = wrap::cuMemGetInfo(&free, &total);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query device memory info: " << ToString(res);
     return false;
@@ -1455,7 +1574,7 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
 /* static */ bool CUDADriver::GetDeviceTotalMemory(CUdevice device,
                                                    uint64 *result) {
   size_t value = -1;
-  CUresult res = cuDeviceTotalMem(&value, device);
+  CUresult res = wrap::cuDeviceTotalMem(&value, device);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query total available memory: " << ToString(res);
     return false;
@@ -1470,7 +1589,8 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
   static const int kBufferSize = 64;
   absl::InlinedVector<char, 4> chars(kBufferSize);
   chars[kBufferSize - 1] = '\0';
-  CUresult res = cuDeviceGetPCIBusId(chars.begin(), kBufferSize - 1, device);
+  CUresult res =
+      wrap::cuDeviceGetPCIBusId(chars.begin(), kBufferSize - 1, device);
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to query PCI bus id for device: " << ToString(res);
     return pci_bus_id;
@@ -1498,7 +1618,7 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
                << to_device.status();
     return false;
   }
-  CUresult res = cuDeviceCanAccessPeer(
+  CUresult res = wrap::cuDeviceCanAccessPeer(
       &can_access_peer, from_device.ValueOrDie(), to_device.ValueOrDie());
   if (res != CUDA_SUCCESS) {
     LOG(ERROR) << "failed to detect peer access capability: " << ToString(res);
@@ -1515,7 +1635,7 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
   }
 
   ScopedActivateContext activated{from};
-  CUresult result = cuCtxEnablePeerAccess(to->context(), 0 /* = flags */);
+  CUresult result = wrap::cuCtxEnablePeerAccess(to->context(), 0 /* = flags */);
   if (result != CUDA_SUCCESS &&
       result != CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED) {
     return port::Status(
@@ -1533,7 +1653,7 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
   ScopedActivateContext activation(context);
 
   int max_blocks;
-  CUresult result = cuOccupancyMaxActiveBlocksPerMultiprocessor(
+  CUresult result = wrap::cuOccupancyMaxActiveBlocksPerMultiprocessor(
       &max_blocks, kernel, threads_per_block, dynamic_shared_memory_bytes);
   if (result != CUDA_SUCCESS) {
     return port::Status(
@@ -1547,7 +1667,7 @@ static port::StatusOr<T> GetSimpleAttribute(CUdevice device,
 
 /* static */ CUcontext CUDADriver::CurrentContextOrDie() {
   CUcontext current = nullptr;
-  CUresult result = cuCtxGetCurrent(&current);
+  CUresult result = wrap::cuCtxGetCurrent(&current);
   if (result != CUDA_SUCCESS) {
     LOG(FATAL) << "failed to query current context: " << ToString(result);
   }

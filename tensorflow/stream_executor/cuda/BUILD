@@ -77,14 +77,15 @@ cc_library(
     hdrs = ["cuda_driver.h"],
     deps = [
         ":cuda_diagnostics",
+        "//tensorflow/stream_executor:device_options",
+        "//tensorflow/stream_executor/lib",
+        "//tensorflow/stream_executor/platform",
+        "//tensorflow/stream_executor/platform:dso_loader",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/strings",
         "@local_config_cuda//cuda:cuda_headers",
-        "//tensorflow/stream_executor:device_options",
-        "//tensorflow/stream_executor/lib",
-        "//tensorflow/stream_executor/platform",
-    ] + tf_additional_cuda_driver_deps(),
+    ],
 )
 
 # The activation library is tightly coupled to the executor library.
@@ -325,6 +326,7 @@ cc_library(
         "//tensorflow/stream_executor:timer",
         "//tensorflow/stream_executor/lib",
         "//tensorflow/stream_executor/platform",
+        "//tensorflow/stream_executor/platform:dso_loader",
         "@com_google_absl//absl/strings",
     ],
     alwayslink = True,
