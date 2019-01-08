@@ -45,6 +45,7 @@ limitations under the License.
 #include "tensorflow/stream_executor/lib/str_util.h"
 #include "tensorflow/stream_executor/lib/stringprintf.h"
 #include "tensorflow/stream_executor/platform.h"
+#include "tensorflow/stream_executor/platform/dso_loader.h"
 #include "tensorflow/stream_executor/platform/logging.h"
 #include "tensorflow/stream_executor/platform/port.h"
 #include "tensorflow/stream_executor/plugin_registry.h"
@@ -68,6 +69,58 @@ bool FLAGS_prefer_cubin_to_ptx = true;
 
 namespace stream_executor {
 namespace cuda {
+
+namespace wrap {
+
+#ifdef PLATFORM_GOOGLE
+#define STREAM_EXECUTOR_LIBCUDA_WRAP(__name) \
+  struct WrapperShim__##__name {             \
+    template <typename... Args>              \
+    CUresult operator()(Args... args) {      \
+      return ::__name(args...);              \
+    }                                        \
+  } __name;
+
+#else
+#define STREAM_EXECUTOR_LIBCUDA_WRAP(__name)                              \
+  struct DynLoadShim__##__name {                                          \
+    static const char *kName;                                             \
+    using FuncPtrT = std::add_pointer<decltype(::__name)>::type;          \
+    static void *GetDsoHandle() {                                         \
+      auto s = internal::CachedDsoLoader::GetLibcudaDsoHandle();          \
+      return s.ValueOrDie();                                              \
+    }                                                                     \
+    static FuncPtrT LoadOrDie() {                                         \
+      void *f;                                                            \
+      auto s = port::Env::Default()->GetSymbolFromLibrary(GetDsoHandle(), \
+                                                          kName, &f);     \
+      CHECK(s.ok()) << "could not find " << kName                         \
+                    << " in libcuda DSO; dlerror: " << s.error_message(); \
+      return reinterpret_cast<FuncPtrT>(f);                               \
+    }                                                                     \
+    static FuncPtrT DynLoad() {                                           \
+      static FuncPtrT f = LoadOrDie();                                    \
+      return f;                                                           \
+    }                                                                     \
+    template <typename... Args>                                           \
+    CUresult operator()(Args... args) {                                   \
+      return DynLoad()(args...);                                          \
+    }                                                                     \
+  } __name;                                                               \
+  const char *DynLoadShim__##__name::kName = #__name;
+
+#endif
+
+// clang-format off
+
+#define LIBCUDA_ROUTINE_EACH(__macro)                   \
+  __macro(cuOccupancyMaxPotentialBlockSize)
+
+// clang-format on
+
+LIBCUDA_ROUTINE_EACH(STREAM_EXECUTOR_LIBCUDA_WRAP)
+#undef LIBCUDA_ROUTINE_EACH
+}  // namespace wrap
 
 // Hook that can be used to CUBIN-ate PTX before it is loaded into the driver.
 // It has been observed that loading both PTX and cubins into the driver library
@@ -497,7 +550,7 @@ int CUDAExecutor::CalculateOccupancy(
     CUfunction func) {
   int suggested_blocks = 0;
   int suggested_threads = 0;
-  CUresult err = cuOccupancyMaxPotentialBlockSize(
+  CUresult err = wrap::cuOccupancyMaxPotentialBlockSize(
       &suggested_blocks, &suggested_threads, func, nullptr,
       shared_memory_per_block, 0);
   CHECK_EQ(err, CUDA_SUCCESS);
@@ -514,7 +567,7 @@ int CUDAExecutor::CompareOccupancy(int *initial_blocks,
                                    CUfunction func) {
   int suggested_blocks = 0;
   int suggested_threads = 0;
-  CUresult err = cuOccupancyMaxPotentialBlockSize(
+  CUresult err = wrap::cuOccupancyMaxPotentialBlockSize(
       &suggested_blocks, &suggested_threads, func, nullptr,
       shared_memory_per_block, 0);
   CHECK_EQ(err, CUDA_SUCCESS);

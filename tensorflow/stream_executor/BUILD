@@ -120,7 +120,6 @@ cc_library(
         "@local_config_cuda//cuda:cuda_headers",
     ] + if_cuda_is_configured([
         "//tensorflow/core:cuda",
-        "@local_config_cuda//cuda:cuda_driver",
     ]),
     alwayslink = 1,
 )
