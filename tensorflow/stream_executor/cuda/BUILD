@@ -74,7 +74,10 @@ cc_library(
 cc_library(
     name = "cuda_driver",
     srcs = ["cuda_driver.cc"],
-    hdrs = ["cuda_driver.h"],
+    hdrs = [
+        "cuda_driver.h",
+        "cuda_driver_wrapper.h",
+    ],
     deps = [
         ":cuda_diagnostics",
         "@com_google_absl//absl/base",
@@ -84,6 +87,7 @@ cc_library(
         "//tensorflow/stream_executor:device_options",
         "//tensorflow/stream_executor/lib",
         "//tensorflow/stream_executor/platform",
+        "//tensorflow/stream_executor/platform:dso_loader",
     ] + tf_additional_cuda_driver_deps(),
 )
 
@@ -313,6 +317,7 @@ cc_library(
         "//tensorflow/stream_executor:timer",
         "//tensorflow/stream_executor/lib",
         "//tensorflow/stream_executor/platform",
+        "//tensorflow/stream_executor/platform:dso_loader",
         "@com_google_absl//absl/strings",
     ],
     alwayslink = True,
