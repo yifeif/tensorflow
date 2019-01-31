@@ -21,6 +21,8 @@ limitations under the License.
 #include "cuda/include/cuda.h"
 #include "cuda/include/cuda_runtime_api.h"
 #include "cuda/include/cudnn.h"
+#include "tensorflow/stream_executor/cuda/cuda_runtime_wrapper.h"
+
 #endif
 
 #ifdef EIGEN_USE_LIBXSMM
@@ -76,8 +78,8 @@ DeviceProperties GetLocalGPUInfo(PlatformGpuId platform_gpu_id) {
 
 #if GOOGLE_CUDA
   cudaDeviceProp properties;
-  cudaError_t error =
-      cudaGetDeviceProperties(&properties, platform_gpu_id.value());
+  cudaError_t error = tensorflow::wrap::cudaGetDeviceProperties(
+      &properties, platform_gpu_id.value());
   if (error != cudaSuccess) {
     device.set_type("UNKNOWN");
     LOG(ERROR) << "Failed to get device properties, error code: " << error;

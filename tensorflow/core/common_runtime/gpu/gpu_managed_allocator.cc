@@ -14,6 +14,9 @@ limitations under the License.
 ==============================================================================*/
 
 #ifdef GOOGLE_CUDA
+
+#include "tensorflow/stream_executor/cuda/cuda_driver_wrapper.h"
+#include "tensorflow/stream_executor/cuda/cuda_runtime_wrapper.h"
 #define EIGEN_USE_GPU
 #endif
 
@@ -24,7 +27,11 @@ namespace tensorflow {
 void* GpuManagedAllocator::AllocateRaw(size_t alignment, size_t num_bytes) {
   void* ptr = nullptr;
 #ifdef GOOGLE_CUDA
-  CHECK_EQ(cudaMallocManaged(&ptr, num_bytes), cudaSuccess);
+  CUdeviceptr result = 0;
+  CHECK_EQ(tensorflow::wrap::cuMemAllocManaged(&result, num_bytes,
+                                               CU_MEM_ATTACH_GLOBAL),
+           CUDA_SUCCESS);
+  ptr = reinterpret_cast<void*>(result);
 #endif
   CHECK(!(reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)));
   return ptr;
@@ -32,7 +39,7 @@ void* GpuManagedAllocator::AllocateRaw(size_t alignment, size_t num_bytes) {
 
 void GpuManagedAllocator::DeallocateRaw(void* ptr) {
 #ifdef GOOGLE_CUDA
-  CHECK_EQ(cudaFree(ptr), cudaSuccess);
+  CHECK_EQ(tensorflow::wrap::cudaFree(ptr), cudaSuccess);
 #endif
 }
 

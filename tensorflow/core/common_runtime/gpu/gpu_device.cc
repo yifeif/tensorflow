@@ -65,6 +65,7 @@ limitations under the License.
 #include "tensorflow/core/util/device_name_utils.h"
 #include "tensorflow/core/util/env_var.h"
 #include "tensorflow/core/util/stream_executor_util.h"
+#include "tensorflow/stream_executor/cuda/cuda_runtime_wrapper.h"
 
 #if !defined(PLATFORM_GOOGLE)
 #include "cuda/cuda_config.h"
@@ -140,7 +141,8 @@ class EigenGpuStreamDevice : public ::Eigen::StreamInterface {
     }
     AsyncFreeData* afData =
         new AsyncFreeData(allocator_, buffer, operation_, step_id_);
-    cudaError_t err = cudaStreamAddCallback(*stream_, asyncFree, afData, 0);
+    cudaError_t err =
+        tensorflow::wrap::cudaStreamAddCallback(*stream_, asyncFree, afData, 0);
     CHECK_EQ(err, cudaSuccess);
   }
 
@@ -947,32 +949,33 @@ Status BaseGPUDeviceFactory::CreateDevices(
   if (!valid_platform_gpu_ids.empty()) {
     // Save the original device.
     int original_device = 0;
-    cudaError_t err = cudaGetDevice(&original_device);
+    cudaError_t err = tensorflow::wrap::cudaGetDevice(&original_device);
     if (err != cudaSuccess) {
       return errors::Internal("cudaGetDevice() failed. Status: ",
-                              cudaGetErrorString(err));
+                              tensorflow::wrap::cudaGetErrorString(err));
     }
     // Force to implicitly initialize CUDA runtime on each valid GPU before
     // CreateGPUDevice().
     for (PlatformGpuId platform_gpu_id : valid_platform_gpu_ids) {
-      err = cudaSetDevice(platform_gpu_id.value());
+      err = tensorflow::wrap::cudaSetDevice(platform_gpu_id.value());
       if (err != cudaSuccess) {
-        return errors::Internal("cudaSetDevice() on GPU:",
-                                platform_gpu_id.value(), " failed. Status: ",
-                                cudaGetErrorString(err));
+        return errors::Internal(
+            "cudaSetDevice() on GPU:", platform_gpu_id.value(),
+            " failed. Status: ", tensorflow::wrap::cudaGetErrorString(err));
       }
-      err = cudaFree(nullptr);
+      err = tensorflow::wrap::cudaFree(nullptr);
       if (err != cudaSuccess) {
         return errors::Internal("CUDA runtime implicit initialization on GPU:",
                                 platform_gpu_id.value(), " failed. Status: ",
-                                cudaGetErrorString(err));
+                                tensorflow::wrap::cudaGetErrorString(err));
       }
     }
     // Reset to the original device.
-    err = cudaSetDevice(original_device);
+    err = tensorflow::wrap::cudaSetDevice(original_device);
     if (err != cudaSuccess) {
-      return errors::Internal("cudaSetDevice() on GPU:", original_device,
-                              " failed. Status: ", cudaGetErrorString(err));
+      return errors::Internal(
+          "cudaSetDevice() on GPU:", original_device,
+          " failed. Status: ", tensorflow::wrap::cudaGetErrorString(err));
     }
   }
 

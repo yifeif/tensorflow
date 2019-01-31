@@ -93,6 +93,21 @@ cc_library(
     ] + tf_additional_cuda_driver_deps()),
 )
 
+cc_library(
+    name = "cuda_runtime_wrapper",
+    hdrs = if_cuda_is_configured([
+        "cuda_runtime_wrapper.h",
+    ]),
+    visibility = ["//visibility:public"],
+    deps = if_cuda_is_configured([
+        "@local_config_cuda//cuda:cuda_headers",
+        "//tensorflow/stream_executor/platform:dso_loader",
+    ]) + [
+        "//tensorflow/stream_executor/lib",
+        "//tensorflow/stream_executor/platform",
+    ],
+)
+
 # The activation library is tightly coupled to the executor library.
 # TODO(leary) split up cuda_gpu_executor.cc so that this can stand alone.
 cc_library(
