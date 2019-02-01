@@ -99,7 +99,6 @@ Status TrtCandidateSelector::IsTensorRTCandidate(const tensorflow::Node* node) {
       "ConcatV2",
       "Const",
       "Conv2D",
-      "Conv2DBackpropInput",
       "DepthwiseConv2dNative",
       "Div",
       "Exp",

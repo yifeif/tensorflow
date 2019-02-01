@@ -93,6 +93,17 @@ cc_library(
     ] + tf_additional_cuda_driver_deps()),
 )
 
+cc_library(
+    name = "cudart_stub",
+    srcs = if_cuda_is_configured(["cudart_stub.cc"]),
+    visibility = ["//visibility:public"],
+    deps = if_cuda_is_configured([
+        "@local_config_cuda//cuda:cuda_headers",
+        "//tensorflow/stream_executor/lib",
+        "//tensorflow/stream_executor/platform:dso_loader",
+    ]),
+)
+
 # The activation library is tightly coupled to the executor library.
 # TODO(leary) split up cuda_gpu_executor.cc so that this can stand alone.
 cc_library(

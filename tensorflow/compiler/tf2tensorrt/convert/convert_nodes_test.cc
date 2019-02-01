@@ -2769,28 +2769,16 @@ TEST_F(OpConverterTest, ConvertConv2D) {
   // Get nodedef for Conv2D layer.
   auto get_conv2d_nodedef =
       [](std::vector<int> strides = {1, 1, 1, 1}, string padding = "SAME",
-         string data_format = "NCHW", std::vector<int> dilations = {1, 1, 1, 1},
-         bool is_conv2d_backprop_input = false) -> NodeDef {
+         string data_format = "NCHW",
+         std::vector<int> dilations = {1, 1, 1, 1}) -> NodeDef {
     Scope s = Scope::NewRootScope();
     auto input = ops::Placeholder(s.WithOpName("input"), DT_FLOAT);
     auto filter = ops::Placeholder(s.WithOpName("weights"), DT_FLOAT);
-    if (is_conv2d_backprop_input) {
-      auto input_sizes =
-          ops::Placeholder(s.WithOpName("input_sizes"), DT_INT32);
-      ops::Conv2DBackpropInput::Attrs attrs = ops::Conv2DBackpropInput::Attrs()
-                                                  .DataFormat(data_format)
-                                                  .Dilations(dilations);
-      auto conv2d =
-          ops::Conv2DBackpropInput(s.WithOpName("my_conv2d"), input_sizes,
-                                   filter, input, strides, padding, attrs);
-      return conv2d.operation.node()->def();
-    } else {
-      ops::Conv2D::Attrs attrs =
-          ops::Conv2D::Attrs().DataFormat(data_format).Dilations(dilations);
-      auto conv2d = ops::Conv2D(s.WithOpName("my_conv2d"), input, filter,
-                                strides, padding, attrs);
-      return conv2d.operation.node()->def();
-    }
+    ops::Conv2D::Attrs attrs =
+        ops::Conv2D::Attrs().DataFormat(data_format).Dilations(dilations);
+    auto conv2d = ops::Conv2D(s.WithOpName("my_conv2d"), input, filter, strides,
+                              padding, attrs);
+    return conv2d.operation.node()->def();
   };
 
   {
@@ -2857,19 +2845,6 @@ TEST_F(OpConverterTest, ConvertConv2D) {
                                "dimensions, at my_conv2d");
   }
   {
-    // Dilation + Conv2DBackpropInput, should fail.
-    Reset();
-    NodeDef node_def =
-        get_conv2d_nodedef({1, 1, 1, 1}, "SAME", "NHWC", {1, 1, 2, 1}, true);
-    AddTestTensor("input", {2, 3, 1});
-    AddTestWeights<float>("weights", {3, 3, 1, 1}, {1, 2, 3, 4, 5, 6, 7, 8, 9});
-    AddTestWeights<int>("input_sizes", {4}, {1, 2, 3, 1});
-    RunValidationAndConversion(node_def, error::UNIMPLEMENTED,
-                               "Dilation with Conv2DBackpropInput "
-                               "(conv2d_transpose) is not supported, "
-                               "at my_conv2d");
-  }
-  {
     // Strides is not 4D, should fail.
     Reset();
     NodeDef node_def =
@@ -2899,7 +2874,6 @@ TEST_F(OpConverterTest, ConvertConv2D) {
                const std::vector<float>& filter,
                const std::vector<int>& strides, const string& padding,
                const string& data_format, const std::vector<int>& dilations,
-               bool is_conv2d_backprop_input,
                const std::vector<int>& expected_output_dims,
                const std::vector<float>& expected_output)
         : input_dims(input_dims),
@@ -2910,7 +2884,6 @@ TEST_F(OpConverterTest, ConvertConv2D) {
           padding(padding),
           data_format(data_format),
           dilations(dilations),
-          is_conv2d_backprop_input(is_conv2d_backprop_input),
           expected_output_dims(expected_output_dims),
           expected_output(expected_output) {}
 
@@ -2922,13 +2895,12 @@ TEST_F(OpConverterTest, ConvertConv2D) {
     string padding;
     string data_format;
     std::vector<int> dilations;
-    bool is_conv2d_backprop_input;
     std::vector<int> expected_output_dims;
     std::vector<float> expected_output;
   };
 
   // Ok.
-  const int kConv2DOKCases = 7;
+  const int kConv2DOKCases = 6;
   TestParams ok_params[kConv2DOKCases] = {
       // Basic
       TestParams{/*input_dims=*/{1, 2, 3},
@@ -2939,7 +2911,6 @@ TEST_F(OpConverterTest, ConvertConv2D) {
                  /*padding=*/"VALID",
                  /*data_format=*/"NCHW",
                  /*dilations=*/{1, 1, 1, 1},
-                 /*is_conv2d_backprop_input=*/false,
                  /*expected_output_dims=*/{1, 2, 2},
                  /*expected_output=*/{1, 1, 0, 1}},
       // SAME padding (Asymmetric)
@@ -2951,7 +2922,6 @@ TEST_F(OpConverterTest, ConvertConv2D) {
                  /*padding=*/"SAME",
                  /*data_format=*/"NCHW",
                  /*dilations=*/{1, 1, 1, 1},
-                 /*is_conv2d_backprop_input=*/false,
                  /*expected_output_dims=*/{1, 2, 3},
                  /*expected_output=*/{1, 1, -2, 0, 1, -4}},
       // SAME padding (Symmetric)
@@ -2963,7 +2933,6 @@ TEST_F(OpConverterTest, ConvertConv2D) {
                  /*padding=*/"SAME",
                  /*data_format=*/"NCHW",
                  /*dilations=*/{1, 1, 1, 1},
-                 /*is_conv2d_backprop_input=*/false,
                  /*expected_output_dims=*/{1, 2, 3},
                  /*expected_output=*/{1, 2, -1, 3, 1, -3}},
       // NHWC
@@ -2975,7 +2944,6 @@ TEST_F(OpConverterTest, ConvertConv2D) {
                  /*padding=*/"VALID",
                  /*data_format=*/"NHWC",
                  /*dilations=*/{1, 1, 1, 1},
-                 /*is_conv2d_backprop_input=*/false,
                  /*expected_output_dims=*/{2, 2, 1},
                  /*expected_output=*/{1, 1, 0, 1}},
       // Dilated
@@ -2987,7 +2955,6 @@ TEST_F(OpConverterTest, ConvertConv2D) {
                  /*padding=*/"VALID",
                  /*data_format=*/"NCHW",
                  /*dilations=*/{1, 1, 1, 2},
-                 /*is_conv2d_backprop_input=*/false,
                  /*expected_output_dims=*/{1, 2, 1},
                  /*expected_output=*/{2, 1}},
       // Strided
@@ -2999,37 +2966,18 @@ TEST_F(OpConverterTest, ConvertConv2D) {
                  /*padding=*/"VALID",
                  /*data_format=*/"NCHW",
                  /*dilations=*/{1, 1, 1, 1},
-                 /*is_conv2d_backprop_input=*/false,
                  /*expected_output_dims=*/{1, 2, 2},
                  /*expected_output=*/{1, 0, 1, 3}},
-      // Transpose Strided
-      TestParams{/*input_dims=*/{1, 2, 2},
-                 /*input=*/{0, 1, 2, 3},
-                 /*filter_dims=*/{1, 2, 1, 1},
-                 /*filter=*/{-1, 1},
-                 /*strides=*/{1, 1, 1, 2},
-                 /*padding=*/"SAME",
-                 /*data_format=*/"NCHW",
-                 /*dilations=*/{1, 1, 1, 1},
-                 /*is_conv2d_backprop_input=*/true,
-                 /*expected_output_dims=*/{1, 2, 4},
-                 /*expected_output=*/{0, 0, -1, 1, -2, 2, -3, 3}},
   };
 
   for (int i = 0; i < kConv2DOKCases; i++) {
     Reset();
-    NodeDef node_def = get_conv2d_nodedef(
-        ok_params[i].strides, ok_params[i].padding, ok_params[i].data_format,
-        ok_params[i].dilations, ok_params[i].is_conv2d_backprop_input);
+    NodeDef node_def =
+        get_conv2d_nodedef(ok_params[i].strides, ok_params[i].padding,
+                           ok_params[i].data_format, ok_params[i].dilations);
     AddTestTensor("input", ok_params[i].input_dims);
     AddTestWeights<float>("weights", ok_params[i].filter_dims,
                           ok_params[i].filter);
-    if (ok_params[i].is_conv2d_backprop_input) {
-      AddTestWeights<float>(
-          "input_sizes",
-          {static_cast<int>(ok_params[i].expected_output.size())},
-          ok_params[i].expected_output);
-    }
     RunValidationAndConversion(node_def);
     TRT_TensorOrWeights output;
     TF_EXPECT_OK(GetTensorOrWeights("my_conv2d", &output));
