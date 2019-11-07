@@ -45,13 +45,15 @@ def tf_additional_license_deps():
 # dependency list is used when using the framework_shared_object config
 # on MacOS platforms. If "macos" is not provided, the "otherwise" list is
 # used for all framework_shared_object platforms including MacOS.
-def if_static(extra_deps, otherwise = [], macos = []):
+def if_static(extra_deps, otherwise = [], macos = [], windows = []):
     ret = {
         str(Label("//tensorflow:framework_shared_object")): otherwise,
         "//conditions:default": extra_deps,
     }
     if macos:
         ret[str(Label("//tensorflow:macos_with_framework_shared_object"))] = macos
+    if windows:
+        ret[str(Label("//tensorflow:windows_with_framework_shared_object"))] = windows
     return select(ret)
 
 def if_static_and_not_mobile(extra_deps, otherwise = []):

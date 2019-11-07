@@ -404,6 +404,9 @@ def tf_binary_additional_srcs(fullversion = False):
         macos = [
             clean_dep("//tensorflow:libtensorflow_framework%s.dylib" % suffix),
         ],
+        windows = [
+            clean_dep("//tensorflow:tensorflow_framework.dll"),
+        ],
         otherwise = [
             clean_dep("//tensorflow:libtensorflow_framework.so%s" % suffix),
         ],
@@ -1700,7 +1703,7 @@ def tf_custom_op_library_additional_deps():
         "@com_google_protobuf//:protobuf_headers",
         clean_dep("//third_party/eigen3"),
         clean_dep("//tensorflow/core:framework_headers_lib"),
-    ] + if_windows(["//tensorflow/python:pywrap_tensorflow_import_lib"])
+    ] + if_windows(["//tensorflow:tensorflow_framework_import_lib"])
 
 # A list of targets that contains the implemenation of
 # tf_custom_op_library_additional_deps. It's used to generate a DEF file for
@@ -2331,6 +2334,7 @@ def tf_generate_proto_text_sources(name, srcs_relative_dir, srcs, protodeps = []
         hdrs = out_hdrs,
         visibility = visibility,
         deps = deps,
+        alwayslink = 1,
     )
 
 def tf_genrule_cmd_append_to_srcs(to_append):
