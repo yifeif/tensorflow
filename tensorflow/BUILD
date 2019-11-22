@@ -575,6 +575,12 @@ tf_cc_shared_object(
     per_os_targets = True,
     soversion = VERSION,
     visibility = ["//visibility:public"],
+    # add win_def_file for tensorflow_framework
+    win_def_file = select({
+        # We need this DEF file to properly export symbols on Windows
+        "//tensorflow:windows": ":tensorflow_filtered_def_file",
+        "//conditions:default": None,
+    }),
     deps = [
         "//tensorflow/cc/saved_model:loader_lite_impl",
         "//tensorflow/core:core_cpu_impl",
@@ -718,6 +724,34 @@ genrule(
     }),
     tools = ["@local_config_def_file_filter//:def_file_filter"],
     visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "get_tensorflow_framework_dll_import_lib",
+    srcs = ["//tensorflow:tensorflow_framework.dll"],
+    output_group = "interface_library",
+    visibility = ["//visibility:public"],
+)
+
+# Rename the import library for tensorflow.dll from tensorflow_framework.dll.if.lib to tensorflow.lib
+genrule(
+    name = "tensorflow_framework_dll_import_lib",
+    srcs = [":get_tensorflow_framework_dll_import_lib"],
+    outs = ["tensorflow_framework.lib"],
+    cmd = select({
+        "//tensorflow:windows": "cp -f $< $@",
+        "//conditions:default": "touch $@",  # Just a placeholder for Unix platforms
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_import(
+    name = "tensorflow_framework_import_lib",
+    interface_library = select({
+        "//tensorflow:windows": ":tensorflow_framework_dll_import_lib",
+        "//conditions:default": "not_exsiting_on_unix.lib",  # Just a placeholder for Unix platforms
+    }),
+    system_provided = 1,
 )
 
 # The interface library (tensorflow.dll.if.lib) for linking tensorflow DLL library (tensorflow.dll) on Windows.

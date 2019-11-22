@@ -310,30 +310,16 @@ Status ModularFileSystem::GetFileSize(const std::string& fname,
 
 Status ModularFileSystem::RenameFile(const std::string& src,
                                      const std::string& target) {
-  if (ops_->rename_file == nullptr) {
-    Status status = CopyFile(src, target);
-    if (status.ok()) status = DeleteFile(src);
-    return status;
-  }
-
-  UniquePtrTo_TF_Status plugin_status(TF_NewStatus(), TF_DeleteStatus);
-  std::string translated_src = TranslateName(src);
-  std::string translated_target = TranslateName(target);
-  ops_->rename_file(filesystem_.get(), translated_src.c_str(),
-                    translated_target.c_str(), plugin_status.get());
-  return StatusFromTF_Status(plugin_status.get());
+  // TODO(mihaimaruseac): Implementation to come in a new change
+  return Status(error::UNIMPLEMENTED,
+                "Modular filesystem stub not implemented yet");
 }
 
 Status ModularFileSystem::CopyFile(const std::string& src,
                                    const std::string& target) {
-  if (ops_->copy_file == nullptr) return FileSystem::CopyFile(src, target);
-
-  UniquePtrTo_TF_Status plugin_status(TF_NewStatus(), TF_DeleteStatus);
-  const std::string& translated_src = TranslateName(src);
-  const std::string& translated_target = TranslateName(target);
-  ops_->copy_file(filesystem_.get(), translated_src.c_str(),
-                  translated_target.c_str(), plugin_status.get());
-  return StatusFromTF_Status(plugin_status.get());
+  // TODO(mihaimaruseac): Implementation to come in a new change
+  return Status(error::UNIMPLEMENTED,
+                "Modular filesystem stub not implemented yet");
 }
 
 std::string ModularFileSystem::TranslateName(const std::string& name) const {
